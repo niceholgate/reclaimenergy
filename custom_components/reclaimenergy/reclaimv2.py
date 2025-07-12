@@ -10,10 +10,7 @@ import aiomqtt
 import boto3
 import botocore
 
-AWS_REGION_NAME = "ap-southeast-2"
-AWS_IDENTITY_POOL = "ap-southeast-2:e04c5d62-0c40-4eac-a343-27d5f76c4920"
-AWS_HOSTNAME = "a254daig9zo2wn-ats.iot.ap-southeast-2.amazonaws.com"
-AWS_PORT = 8883
+from .const import AWS_REGION_NAME, AWS_IDENTITY_POOL, AWS_HOSTNAME, AWS_PORT
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -153,11 +150,16 @@ class ReclaimState:
     def __getattr__(self, name: str):
         """Return a processed attribute."""
         try:
-            mb = self.modbus_map[name]
-            if mb[1]:
-                return mb[1](self.data[mb[0]])
+            if self.data:
+                mb = self.modbus_map[name]
+                if mb[0] not in self.data:
+                    return "unavailable"
 
-            return self.data[mb[0]]
+                if mb[1]:
+                    return mb[1](self.data[mb[0]])
+
+                return self.data[mb[0]]
+            return "unavailable"
         except (IndexError, KeyError) as e:
             raise AttributeError from e
 
@@ -187,7 +189,7 @@ class ReclaimV2:
         self.subscribe_topic = f"dontek{hexid}/status/psw"
         self.command_topic = f"dontek{hexid}/cmd/psw"
 
-    def connect(self, listener: MessageListener) -> None:
+    async def connect(self, listener: MessageListener) -> None:
         """Connect to MQTT server and subscribe for updates."""
         self._listener_task = asyncio.create_task(self._listen(listener))
 
@@ -209,7 +211,7 @@ class ReclaimV2:
                 async with aiomqtt.Client(
                     hostname=AWS_HOSTNAME, port=AWS_PORT, tls_context=tls_context
                 ) as self._client:
-                    _LOGGER.debug("Connected, subscribing to %s", self.subscribe_topic)
+                    _LOGGER.warning("Connected, subscribing to %s", self.subscribe_topic)
                     await self._client.subscribe(self.subscribe_topic)
 
                     # request initial update

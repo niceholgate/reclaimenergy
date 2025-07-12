@@ -10,6 +10,7 @@ CONF_KEY_PATH = "key_path"
 CACERT_FILENAME = "AmazonRootCA1.pem"
 CERT_FILENAME = "reclaim_cert.pem"
 KEY_FILENAME = "reclaim_key.pem"
+UNIQUE_ID_FILENAME = "unique_id.txt"
 
 AWS_IOT_ROOT_CERT = """-----BEGIN CERTIFICATE-----
 MIIDQTCCAimgAwIBAgITBmyfz5m/jAo54vB4ikPmljZbyjANBgkqhkiG9w0BAQsF
@@ -31,3 +32,9 @@ o/ufQJVtMVT8QtPHRh8jrdkPSHCa2XV4cdFyQzR1bldZwgJcJmApzyMZFo6IQ6XU
 5MsI+yMRQ+hDKXJioaldXgjUkK642M4UwtBV8ob2xJNDd2ZhwLnoQdeXeGADbkpy
 rqXRfboQnoZsG4q5WTP468SQvvG5
 -----END CERTIFICATE-----"""
+
+AWS_REGION_NAME = "ap-southeast-2"
+AWS_IDENTITY_POOL = "ap-southeast-2:e04c5d62-0c40-4eac-a343-27d5f76c4920"
+AWS_HOSTNAME = "a254daig9zo2wn-ats.iot.ap-southeast-2.amazonaws.com"
+AWS_PORT = 8883
+

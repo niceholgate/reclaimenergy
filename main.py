@@ -4,7 +4,7 @@ import os, sys
 import logging
 import asyncio
 import uvicorn
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, status, HTTPException
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -79,39 +79,71 @@ app = FastAPI(lifespan=lifespan)
 #     log_state_attr('boost', state)
 
 @app.get('/state')
-async def request_update_and_log_state(request: Request) -> ReclaimStateProcessed:
+async def state(request: Request) -> ReclaimStateProcessed:
     return await _get_latest_state()
 
 @app.post('/boost/on')
-async def boost_on(request: Request) -> str:
+async def boost_on(request: Request, response: Response) -> str:
     # Check if boost is already on.
     state: Optional[ReclaimStateProcessed] = await _get_latest_state()
     if state is None:
-        return 'Failed to get current state; will not turn on boost'
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Failed to get current state; will not turn on boost')
     elif state.boost:
-        return "Boost was already on; will not turn on boost"
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='Boost was already on; will not turn on boost')
+    elif state.water > 55:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='Water temperature was over 55C; will not turn on boost')
     elif state.pump:
-        return "Heater is already running (non-boost); will not turn on boost"
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='Heater is already running (non-boost); will not turn on boost')
     else:
         await request.app.state.reclaimv2.set_value("boost", True)
         state = await _get_latest_state()
         if state is None:
-            return 'Failed to get updated state; boost status uncertain'
-        return 'TURN ON BOOST: SUCCESS' if state.boost else 'TURN ON BOOST: FAILURE'
-
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail='Failed to get updated state; boost status uncertain')
+        if state.boost:
+            return 'TURN ON BOOST: SUCCESS'
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail='TURN ON BOOST: FAILURE')
+# TODO: response object with ATTRIBUTE, INITIAL_STATE, FINAL_STATE, DETAIL
 @app.post('/boost/off')
 async def boost_off(request: Request) -> str:
     state: Optional[ReclaimStateProcessed] = await _get_latest_state()
     if state is None:
-        return 'Failed to get current state; will not turn off boost'
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail='Failed to get current state; will not turn off boost'
+        )
     elif not state.boost:
-        return "Boost was already off; will not turn off boost"
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail='Boost was already off; will not turn off boost'
+        )
     else:
         await request.app.state.reclaimv2.set_value("boost", False)
         state = await _get_latest_state()
         if state is None:
-            return 'Failed to get updated state; boost status uncertain'
-        return 'TURN OFF BOOST: SUCCESS' if not state.boost else 'TURN OFF BOOST: FAILURE'
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail='Failed to get updated state; boost status uncertain'
+            )
+        if not state.boost:
+            return 'TURN OFF BOOST: SUCCESS'
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail='TURN OFF BOOST: FAILURE'
+            )
 
 async def _get_latest_state() -> Optional[ReclaimStateProcessed]:
     if (await app.state.reclaimv2.request_update()):

@@ -211,7 +211,7 @@ class ReclaimV2:
                 async with aiomqtt.Client(
                     hostname=AWS_HOSTNAME, port=AWS_PORT, tls_context=tls_context
                 ) as self._client:
-                    _LOGGER.warning("Connected, subscribing to %s", self.subscribe_topic)
+                    _LOGGER.info("Connected, subscribing to %s", self.subscribe_topic)
                     await self._client.subscribe(self.subscribe_topic)
 
                     # request initial update
@@ -241,6 +241,7 @@ class ReclaimV2:
             _LOGGER.debug("listener is cancelled")
         self._listener_task = None
         self._client = None
+        _LOGGER.info("Disconnected from MQTT Server")
 
     def _process_message(self, message, listener: MessageListener):
         try:
@@ -264,11 +265,11 @@ class ReclaimV2:
         except (json.JSONDecodeError, IndexError, AttributeError) as e:
             _LOGGER.error("Error processing payload(%s): %s", e, message.payload)
 
-    async def request_update(self) -> None:
+    async def request_update(self) -> bool:
         """Send MQTT update request to controller."""
         if not self._connected:
             _LOGGER.warning("Not connected")
-            return
+            return False
 
         if self._client:
             try:
@@ -277,8 +278,10 @@ class ReclaimV2:
                     json.dumps({"messageId": "read", "modbusReg": 1, "modbusVal": [1]}),
                     qos=1,
                 )
+                return True
             except aiomqtt.exceptions.MqttError as e:
                 _LOGGER.error("Error publishing update request: %s", e)
+        return False
 
     async def set_value(self, name: str, value: Any) -> None:
         """Send MQTT message to turn on boost mode."""

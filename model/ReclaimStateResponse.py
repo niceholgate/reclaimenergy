@@ -2,7 +2,7 @@ from pydantic import BaseModel
 from typing import Optional
 from custom_components.reclaimenergy.reclaimv2 import ReclaimState
 
-class ReclaimStateProcessed(BaseModel):
+class ReclaimStateResponse(BaseModel):
     mode: str
     pump: bool
     case: float
@@ -23,8 +23,8 @@ class ReclaimStateProcessed(BaseModel):
     boost: bool
 
     @staticmethod
-    def from_unprocessed_state(state: ReclaimState) -> Optional['ReclaimStateProcessed']:
-        return ReclaimStateProcessed(
+    def from_state(state: ReclaimState) -> Optional['ReclaimStateResponse']:
+        return ReclaimStateResponse(
             mode=state.mode,
             pump=state.pump==1,
             case=state.case,

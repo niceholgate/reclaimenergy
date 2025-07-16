@@ -4,6 +4,14 @@ import os, sys
 import logging
 import asyncio
 import uvicorn
+import asyncpg
+
+# Set environment variables for local PostgreSQL connection
+os.environ["DB_USER"] = "user"
+os.environ["DB_PASSWORD"] = "password"
+os.environ["DB_HOST"] = "localhost"
+os.environ["DB_PORT"] = "5433"
+os.environ["DB_NAME"] = "reclaim_energy"
 from fastapi import FastAPI, Request, Response, status
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -56,8 +64,28 @@ async def lifespan(app: FastAPI):
     await app.state.reclaimv2.connect(app.state.listener)
 
     _LOGGER.info("Connecting to database...")
-    app.state.database_connection = "Mock DB Connection"
-    _LOGGER.info("Database connected.")
+    db_user = os.environ.get("DB_USER")
+    db_password = os.environ.get("DB_PASSWORD")
+    db_host = os.environ.get("DB_HOST")
+    db_port = os.environ.get("DB_PORT")
+    db_name = os.environ.get("DB_NAME")
+
+    _LOGGER.info(f"Attempting to connect with: User={db_user}, Host={db_host}, Port={db_port}, DB={db_name}")
+    # WARNING: Do NOT log the password in a production environment!
+    _LOGGER.info(f"Password length: {len(db_password) if db_password else 0}")
+
+    try:
+        app.state.pool = await asyncpg.create_pool(
+            user=db_user,
+            password=db_password,
+            host=db_host,
+            port=int(db_port),
+            database=db_name,
+        )
+        _LOGGER.info("Database connected.")
+    except Exception as e:
+        _LOGGER.error(f"Failed to connect to database: {e}")
+        app.state.pool = None
 
     yield
 
@@ -65,7 +93,9 @@ async def lifespan(app: FastAPI):
     await app.state.reclaimv2.disconnect()
 
     _LOGGER.info("Disconnecting from database...")
-    app.state.database_connection = None
+    if app.state.pool:
+        await app.state.pool.close()
+        app.state.pool = None
     _LOGGER.info("Database disconnected.")
 
 app = FastAPI(lifespan=lifespan)

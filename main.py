@@ -71,32 +71,39 @@ async def state(request: Request) -> ReclaimStateResponse:
     return await _get_latest_state()
 
 @app.post('/boost/on')
-async def boost_on(request: Request, response: Response) -> str:
-    error_response = await _validate_boost_on(BoostStatus.OFF)
+async def boost_on(request: Request, response: Response) -> ReclaimBoostResponse:
+    error_response = await _validate_boost_toggle(BoostStatus.OFF)
     if error_response:
+        response.status_code = error_response.status_code
         return error_response
 
-    return await _perform_boost_toggle(BoostStatus.OFF)
+    toggle_response = await _perform_boost_toggle(BoostStatus.OFF)
+    response.status_code = toggle_response.status_code
+    return toggle_response
 
 @app.post('/boost/off')
-async def boost_off(request: Request) -> str:
+async def boost_off(request: Request, response: Response) -> ReclaimBoostResponse:
     error_response = await _validate_boost_toggle(BoostStatus.ON)
     if error_response:
+        response.status_code = error_response.status_code
         return error_response
 
-    return await _perform_boost_toggle(BoostStatus.ON)
+    toggle_response = await _perform_boost_toggle(BoostStatus.ON)
+    response.status_code = toggle_response.status_code
+    return toggle_response
 
 async def _get_latest_state() -> Optional[ReclaimStateResponse]:
     if (await app.state.reclaimv2.request_update()):
         return ReclaimStateResponse.from_state(app.state.listener.state)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 async def _validate_boost_toggle(expected_initial_status: BoostStatus) -> Optional[ReclaimBoostResponse]:
     if expected_initial_status == BoostStatus.UNKNOWN:
         raise ValueError(f'Expected initial status is {expected_initial_status}')
     desired_final_status = BoostStatus.OFF if expected_initial_status == BoostStatus.ON else BoostStatus.ON
 
-    state: Optional[ReclaimStateResponse] = await _get_latest_state()
-    if state is None:
+    state = await _get_latest_state()
+    if state is None or isinstance(state, Response):
         return ReclaimBoostResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                                     initial_status=BoostStatus.UNKNOWN,
                                     final_status=BoostStatus.UNKNOWN,
@@ -122,25 +129,25 @@ async def _perform_boost_toggle(initial_status: BoostStatus) -> ReclaimBoostResp
     if initial_status == BoostStatus.UNKNOWN:
         raise Exception('Cannot toggle boost because current state is unknown.')
     desired_final_status = BoostStatus.OFF if initial_status == BoostStatus.ON else BoostStatus.ON
-    await app.state.reclaimv2.set_value("boost", initial_status == BoostStatus.OFF)
+    await app.state.reclaimv2.set_value("boost", desired_final_status == BoostStatus.ON)
     state = await _get_latest_state()
 
-    if state is None:
+    if state is None or isinstance(state, Response):
         return ReclaimBoostResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                                     initial_status=initial_status,
                                     final_status=BoostStatus.UNKNOWN,
                                     detail='Failed to get updated state; boost status uncertain.')
 
-    if state.boost is not boost_on:
+    if state.boost is not (desired_final_status == BoostStatus.ON):
         return ReclaimBoostResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                                     initial_status=initial_status,
                                     final_status=initial_status,
-                                    detail=f'Failed to turn {desired_final_status} boost.')
+                                    detail=f'Failed to turn {desired_final_status.value} boost.')
 
     return ReclaimBoostResponse(status_code=status.HTTP_200_OK,
                                 initial_status=initial_status,
                                 final_status=desired_final_status,
-                                detail=f'Turned {desired_final_status} boost.')
+                                detail=f'Turned {desired_final_status.value} boost.')
 
 
 if __name__ == "__main__":

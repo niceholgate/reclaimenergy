@@ -55,14 +55,18 @@ async def lifespan(app: FastAPI):
     app.state.listener = MessageListener()
     await app.state.reclaimv2.connect(app.state.listener)
 
-    # TODO: Connect to the DB
+    _LOGGER.info("Connecting to database...")
+    app.state.database_connection = "Mock DB Connection"
+    _LOGGER.info("Database connected.")
 
     yield
 
     # Disconnect from the Reclaim HWS
     await app.state.reclaimv2.disconnect()
 
-    # TODO: Disconnect from the DB
+    _LOGGER.info("Disconnecting from database...")
+    app.state.database_connection = None
+    _LOGGER.info("Database disconnected.")
 
 app = FastAPI(lifespan=lifespan)
 

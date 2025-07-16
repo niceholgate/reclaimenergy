@@ -40,9 +40,9 @@ class MessageListener:
         """Process device state updates."""
         self.state = state
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Connect to the Reclaim HWS
     obtain_and_save_aws_keys(CACERT_PATH, CERT_PATH, KEY_PATH)
     with open(UNIQUE_ID_PATH, 'r') as f:
         unique_id = int(f.readline().strip())
@@ -55,118 +55,93 @@ async def lifespan(app: FastAPI):
     app.state.listener = MessageListener()
     await app.state.reclaimv2.connect(app.state.listener)
 
+    # TODO: Connect to the DB
+
     yield
 
+    # Disconnect from the Reclaim HWS
     await app.state.reclaimv2.disconnect()
 
-app = FastAPI(lifespan=lifespan)
+    # TODO: Disconnect from the DB
 
-# def log_state_attr(attr: str,  state: ReclaimState) -> None:
-#     _LOGGER.warning(f'{attr}, {state.__getattr__(attr)}')
-#
-# def log_all(state: ReclaimState):
-#     log_state_attr('pump', state)
-#     log_state_attr('case', state)
-#     log_state_attr('water', state)
-#     log_state_attr('inlet', state)
-#     log_state_attr('outlet', state)
-#     log_state_attr('ambient', state)
-#     log_state_attr('suction', state)
-#     log_state_attr('evaporator', state)
-#     log_state_attr('discharge', state)
-#     log_state_attr('waterspeed', state)
-#     log_state_attr('power', state)
-#     log_state_attr('boost', state)
+app = FastAPI(lifespan=lifespan)
 
 @app.get('/state')
 async def state(request: Request) -> ReclaimStateResponse:
     return await _get_latest_state()
 
-async def _validate_boost_on(state: Optional[ReclaimStateResponse]) -> Optional[ReclaimBoostResponse]:
-    if state is None:
-        return ReclaimBoostResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                                    initial_status=BoostStatus.UNKNOWN,
-                                    final_status=BoostStatus.UNKNOWN,
-                                    detail='Failed to get current state; will not turn on boost.')
-
-    if state.boost:
-        return ReclaimBoostResponse(status_code=status.HTTP_409_CONFLICT,
-                                    initial_status=BoostStatus.ON,
-                                    final_status=BoostStatus.ON,
-                                    detail='Boost was already on; will not turn on boost.')
-    elif state.pump or state.water > 55:
-        return ReclaimBoostResponse(status_code=status.HTTP_409_CONFLICT,
-                                    initial_status=BoostStatus.OFF,
-                                    final_status=BoostStatus.OFF,
-                                    detail='Heater is already running (non-boost); will not turn on boost.'
-                                        if state.pump else 'Water temperature was over 55C; will not turn on boost.')
-    return None
-
-async def _perform_boost_on() -> ReclaimBoostResponse:
-    await app.state.reclaimv2.set_value("boost", True)
-    state = await _get_latest_state()
-    if state is None or not state.boost:
-        return ReclaimBoostResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                                    initial_status=BoostStatus.OFF,
-                                    final_status=BoostStatus.UNKNOWN if state is None else BoostStatus.OFF,
-                                    detail='Failed to get updated state; boost status uncertain.'
-                                        if state is None else 'Failed to turn on boost.')
-    return ReclaimBoostResponse(status_code=status.HTTP_200_OK,
-                                initial_status=BoostStatus.OFF,
-                                final_status=BoostStatus.ON,
-                                detail='Turned on boost.')
-
-async def _perform_boost_off() -> ReclaimBoostResponse:
-    await app.state.reclaimv2.set_value("boost", False)
-    state = await _get_latest_state()
-    if state is None or state.boost:
-        return ReclaimBoostResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                                    initial_status=BoostStatus.ON,
-                                    final_status=BoostStatus.UNKNOWN if state is None else BoostStatus.ON,
-                                    detail='Failed to get updated state; boost status uncertain.'
-                                    if state is None else 'Failed to turn off boost.')
-    return ReclaimBoostResponse(status_code=status.HTTP_200_OK,
-                                initial_status=BoostStatus.ON,
-                                final_status=BoostStatus.OFF,
-                                detail='Turned off boost.')
-
 @app.post('/boost/on')
 async def boost_on(request: Request, response: Response) -> str:
-    state: Optional[ReclaimStateResponse] = await _get_latest_state()
-    
-    error_response = await _validate_boost_on(state)
+    error_response = await _validate_boost_on(BoostStatus.OFF)
     if error_response:
         return error_response
 
-    return await _perform_boost_on(request)
-
-async def _validate_boost_off(state: Optional[ReclaimStateResponse]) -> Optional[ReclaimBoostResponse]:
-    if state is None:
-        return ReclaimBoostResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                                    initial_status=BoostStatus.UNKNOWN,
-                                    final_status=BoostStatus.UNKNOWN,
-                                    detail='Failed to get current state; will not turn off boost.')
-
-    if not state.boost:
-        return ReclaimBoostResponse(status_code=status.HTTP_409_CONFLICT,
-                                    initial_status=BoostStatus.OFF,
-                                    final_status=BoostStatus.OFF,
-                                    detail='Boost was already off; will not turn off boost.')
-    return None
+    return await _perform_boost_toggle(BoostStatus.OFF)
 
 @app.post('/boost/off')
 async def boost_off(request: Request) -> str:
-    state: Optional[ReclaimStateResponse] = await _get_latest_state()
-
-    error_response = await _validate_boost_off(state)
+    error_response = await _validate_boost_toggle(BoostStatus.ON)
     if error_response:
         return error_response
 
-    return await _perform_boost_off(request)
+    return await _perform_boost_toggle(BoostStatus.ON)
 
 async def _get_latest_state() -> Optional[ReclaimStateResponse]:
     if (await app.state.reclaimv2.request_update()):
         return ReclaimStateResponse.from_state(app.state.listener.state)
+
+async def _validate_boost_toggle(expected_initial_status: BoostStatus) -> Optional[ReclaimBoostResponse]:
+    if expected_initial_status == BoostStatus.UNKNOWN:
+        raise ValueError(f'Expected initial status is {expected_initial_status}')
+    desired_final_status = BoostStatus.OFF if expected_initial_status == BoostStatus.ON else BoostStatus.ON
+
+    state: Optional[ReclaimStateResponse] = await _get_latest_state()
+    if state is None:
+        return ReclaimBoostResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                    initial_status=BoostStatus.UNKNOWN,
+                                    final_status=BoostStatus.UNKNOWN,
+                                    detail=f'Failed to get current state; will not turn boost {desired_final_status}.')
+
+    initial_status = BoostStatus.ON if state.boost else BoostStatus.OFF
+
+    if initial_status == desired_final_status:
+        return ReclaimBoostResponse(status_code=status.HTTP_409_CONFLICT,
+                                    initial_status=initial_status,
+                                    final_status=initial_status,
+                                    detail=f'Boost was already {desired_final_status}; will not turn boost {desired_final_status}.')
+    elif desired_final_status == BoostStatus.ON:
+        if state.pump or state.water > 55:
+            return ReclaimBoostResponse(status_code=status.HTTP_409_CONFLICT,
+                                        initial_status=BoostStatus.OFF,
+                                        final_status=BoostStatus.OFF,
+                                        detail='Heater is already running (non-boost); will not turn on boost.'
+                                            if state.pump else 'Water temperature is over 55C; will not turn on boost.')
+    return None
+
+async def _perform_boost_toggle(initial_status: BoostStatus) -> ReclaimBoostResponse:
+    if initial_status == BoostStatus.UNKNOWN:
+        raise Exception('Cannot toggle boost because current state is unknown.')
+    desired_final_status = BoostStatus.OFF if initial_status == BoostStatus.ON else BoostStatus.ON
+    await app.state.reclaimv2.set_value("boost", initial_status == BoostStatus.OFF)
+    state = await _get_latest_state()
+
+    if state is None:
+        return ReclaimBoostResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                    initial_status=initial_status,
+                                    final_status=BoostStatus.UNKNOWN,
+                                    detail='Failed to get updated state; boost status uncertain.')
+
+    if state.boost is not boost_on:
+        return ReclaimBoostResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                                    initial_status=initial_status,
+                                    final_status=initial_status,
+                                    detail=f'Failed to turn {desired_final_status} boost.')
+
+    return ReclaimBoostResponse(status_code=status.HTTP_200_OK,
+                                initial_status=initial_status,
+                                final_status=desired_final_status,
+                                detail=f'Turned {desired_final_status} boost.')
+
 
 if __name__ == "__main__":
     if sys.platform.lower() == "win32" or os.name.lower() == "nt":

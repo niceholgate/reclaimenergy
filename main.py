@@ -115,6 +115,9 @@ async def lifespan(app: FastAPI):
         _LOGGER.error(f"Failed to connect to database or create table: {e}")
         app.state.pool = None
 
+    app.state.logging_task = None
+    app.state.stop_logging_event = asyncio.Event()
+
     yield
 
     # Disconnect from the Reclaim HWS
@@ -130,7 +133,53 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get('/state')
 async def state(request: Request) -> ReclaimStateResponse:
-    return await _get_latest_state()
+    state: Optional[ReclaimStateResponse] = await _get_latest_state()
+    return state if state else ReclaimStateResponse(
+        mode='unknown'
+    )
+
+@app.post('/logging/start/{interval_seconds}')
+async def start_logging(request: Request, interval_seconds: int):
+    if app.state.logging_task and not app.state.logging_task.done():
+        return Response(status_code=status.HTTP_409_CONFLICT, content="Logging is already running.")
+
+    app.state.stop_logging_event.clear()
+    app.state.logging_task = asyncio.create_task(_log_data_periodically(interval_seconds))
+    return Response(status_code=status.HTTP_200_OK, content=f"Started logging data every {interval_seconds} seconds.")
+
+@app.post('/logging/stop')
+async def stop_logging(request: Request):
+    if not app.state.logging_task or app.state.logging_task.done():
+        return Response(status_code=status.HTTP_404_NOT_FOUND, content="Logging is not running.")
+
+    app.state.stop_logging_event.set()
+    await app.state.logging_task
+    return Response(status_code=status.HTTP_200_OK, content="Stopped logging data.")
+
+@app.get('/logging/status')
+async def logging_status(request: Request):
+    if app.state.logging_task and not app.state.logging_task.done():
+        return {"status": "running"}
+    return {"status": "stopped"}
+
+async def _log_data_periodically(interval_seconds: int):
+    while not app.state.stop_logging_event.is_set():
+        try:
+            state = await _get_latest_state()
+            if state and app.state.pool:
+                async with app.state.pool.acquire() as connection:
+                    await connection.execute("""
+                        INSERT INTO reclaim_state_history (mode, pump, "case", water, outlet, inlet, discharge, suction, evaporator, ambient, compspeed, waterspeed, fanspeed, power, current, hours, starts, boost)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                    """, state.mode, state.pump, state.case, state.water, state.outlet, state.inlet, state.discharge, state.suction, state.evaporator, state.ambient, state.compspeed, state.waterspeed, state.fanspeed, state.power, state.current, state.hours, state.starts, state.boost)
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            _LOGGER.info("Logging task cancelled.")
+            break
+        except Exception as e:
+            _LOGGER.error(f"Error in logging task: {e}")
+            # Decide if the loop should continue or stop on error
+            await asyncio.sleep(interval_seconds)
 
 @app.post('/boost/on')
 async def boost_on(request: Request, response: Response) -> ReclaimBoostResponse:
@@ -240,7 +289,7 @@ async def delete_test_data(request: Request, start_id: int, end_id: int):
 async def _get_latest_state() -> Optional[ReclaimStateResponse]:
     if (await app.state.reclaimv2.request_update()):
         return ReclaimStateResponse.from_state(app.state.listener.state)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return None
 
 async def _validate_boost_toggle(expected_initial_status: BoostStatus) -> Optional[ReclaimBoostResponse]:
     if expected_initial_status == BoostStatus.UNKNOWN:
@@ -248,7 +297,7 @@ async def _validate_boost_toggle(expected_initial_status: BoostStatus) -> Option
     desired_final_status = BoostStatus.OFF if expected_initial_status == BoostStatus.ON else BoostStatus.ON
 
     state = await _get_latest_state()
-    if state is None or isinstance(state, Response):
+    if state is None:
         return ReclaimBoostResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                                     initial_status=BoostStatus.UNKNOWN,
                                     final_status=BoostStatus.UNKNOWN,
@@ -277,7 +326,7 @@ async def _perform_boost_toggle(initial_status: BoostStatus) -> ReclaimBoostResp
     await app.state.reclaimv2.set_value("boost", desired_final_status == BoostStatus.ON)
     state = await _get_latest_state()
 
-    if state is None or isinstance(state, Response):
+    if state is None:
         return ReclaimBoostResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                                     initial_status=initial_status,
                                     final_status=BoostStatus.UNKNOWN,

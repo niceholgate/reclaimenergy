@@ -83,8 +83,36 @@ async def lifespan(app: FastAPI):
             database=db_name,
         )
         _LOGGER.info("Database connected.")
+
+        # Create table if it doesn't exist
+        async with app.state.pool.acquire() as connection:
+            await connection.execute("""
+                CREATE TABLE IF NOT EXISTS reclaim_state_history (
+                    id SERIAL PRIMARY KEY,
+                    timestamp_ms BIGINT DEFAULT (EXTRACT(EPOCH FROM NOW()) * 1000),
+                    mode TEXT,
+                    pump BOOLEAN,
+                    "case" REAL,
+                    water REAL,
+                    outlet REAL,
+                    inlet REAL,
+                    discharge REAL,
+                    suction REAL,
+                    evaporator REAL,
+                    ambient REAL,
+                    compspeed INTEGER,
+                    waterspeed INTEGER,
+                    fanspeed INTEGER,
+                    power INTEGER,
+                    current REAL,
+                    hours REAL,
+                    starts REAL,
+                    boost BOOLEAN
+                )
+            """)
+        _LOGGER.info("Table 'reclaim_state_history' ensured to exist.")
     except Exception as e:
-        _LOGGER.error(f"Failed to connect to database: {e}")
+        _LOGGER.error(f"Failed to connect to database or create table: {e}")
         app.state.pool = None
 
     yield
@@ -125,6 +153,89 @@ async def boost_off(request: Request, response: Response) -> ReclaimBoostRespons
     toggle_response = await _perform_boost_toggle(BoostStatus.ON)
     response.status_code = toggle_response.status_code
     return toggle_response
+
+@app.get('/tables')
+async def get_tables(request: Request):
+    if not app.state.pool:
+        return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content="Database not connected")
+
+    async with app.state.pool.acquire() as connection:
+        tables = await connection.fetch("""
+            SELECT tablename
+            FROM pg_catalog.pg_tables
+            WHERE schemaname != 'pg_catalog' AND schemaname != 'information_schema'
+        """)
+        
+        response = {}
+        for table in tables:
+            table_name = table['tablename']
+            columns = await connection.fetch(f"""
+                SELECT column_name, data_type 
+                FROM information_schema.columns 
+                WHERE table_name = '{table_name}'
+            """)
+            response[table_name] = {col['column_name']: col['data_type'] for col in columns}
+            
+        return response
+
+@app.get('/history/{start_timestamp_ms}/{end_timestamp_ms}')
+async def get_history(request: Request, start_timestamp_ms: int, end_timestamp_ms: int, sample_rate: Optional[int] = None):
+    if not app.state.pool:
+        return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content="Database not connected")
+
+    query = """
+        SELECT * FROM reclaim_state_history
+        WHERE timestamp_ms >= $1 AND timestamp_ms <= $2
+    """
+    params = [start_timestamp_ms, end_timestamp_ms]
+
+    if sample_rate and sample_rate > 0:
+        query += f" AND id % {sample_rate} = 0"
+
+    query += " ORDER BY timestamp_ms"
+
+    async with app.state.pool.acquire() as connection:
+        records = await connection.fetch(query, *params)
+        if not records:
+            return {}
+        
+        result = {key: [] for key in records[0].keys()}
+        for record in records:
+            for key, value in record.items():
+                result[key].append(value)
+        return result
+
+@app.post('/test_data/add')
+async def add_test_data(request: Request):
+    if not app.state.pool:
+        return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content="Database not connected")
+
+    async with app.state.pool.acquire() as connection:
+        # Insert a sample row of data
+        await connection.execute("""
+            INSERT INTO reclaim_state_history (mode, pump, "case", water, outlet, inlet, discharge, suction, evaporator, ambient, compspeed, waterspeed, fanspeed, power, current, hours, starts, boost)
+            VALUES ('heating', true, 45.1, 50.2, 55.3, 40.1, 60.5, 35.2, 5.1, 25.6, 3000, 100, 500, 1500, 6.5, 1234.5, 123, false)
+        """)
+        return Response(status_code=status.HTTP_201_CREATED, content="Test data added.")
+
+@app.delete('/test_data/delete/{start_id}/{end_id}')
+async def delete_test_data(request: Request, start_id: int, end_id: int):
+    if not app.state.pool:
+        return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content="Database not connected")
+
+    async with app.state.pool.acquire() as connection:
+        result = await connection.execute("DELETE FROM reclaim_state_history WHERE id >= $1 AND id <= $2", start_id, end_id)
+        
+        # The result format is 'DELETE count'. We parse the count.
+        try:
+            count = int(result.split(' ')[1])
+        except (IndexError, ValueError):
+            count = 0
+
+        if count > 0:
+            return Response(status_code=status.HTTP_200_OK, content=f"{count} records between id {start_id} and {end_id} deleted.")
+        else:
+            return Response(status_code=status.HTTP_404_NOT_FOUND, content=f"No records found between id {start_id} and {end_id}.")
 
 async def _get_latest_state() -> Optional[ReclaimStateResponse]:
     if (await app.state.reclaimv2.request_update()):

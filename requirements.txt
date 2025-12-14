@@ -8,3 +8,5 @@ boto
 asyncio
 orjson
 asyncpg
+matplotlib
+pandas

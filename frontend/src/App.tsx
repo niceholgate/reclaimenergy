@@ -113,9 +113,11 @@ function App() {
           throw new Error(`HTTP error! status: ${response.status}`);
         }
         const data = await response.json();
+        console.log(`status: ${data.status}`)
         setIsPlotting(data.status == "running");
       } catch (e: any) {
         console.error("Failed to fetch plotting status:", e);
+        setIsPlotting(false);
       }
     };
 
@@ -129,7 +131,8 @@ function App() {
     const fetchAndSetData = async () => {
       const now = Date.now();
       const fetchedData = await fetchData(startTime, now);
-      if (fetchedData && fetchedData.timestamp_ms.length > 0) {
+      
+      if (fetchedData && fetchedData.timestamp_ms && fetchedData.timestamp_ms.length > 0) {
         setData(fetchedData);
       }
     };
